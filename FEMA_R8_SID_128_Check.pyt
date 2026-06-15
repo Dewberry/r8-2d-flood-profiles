@@ -4,6 +4,7 @@ from os.path import basename, join
 from time import sleep
 
 import arcpy
+import math
 from arcpy.sa import ExtractByMask, ExtractMultiValuesToPoints
 
 FIELD_CALC_DEFINITIONS = """
@@ -20,8 +21,9 @@ def valid_diff_wsels(abs_diff, tolerance):
     else:
         return f"Failed {tolerance}"
 def get_wsel_value(wsel1, wsel2):
-    return wsel1 + wsel2
+    return max(wsel1, wsel2)
 """
+
 DATATYPE_SHP = [
     "DEShapefile",
     "DEDbaseTable",
@@ -34,6 +36,7 @@ DATATYPE_SHP = [
     "DEArcInfoTable",
     "GPString",
 ]
+
 DATATYPE_TIF = [
     "DEMosaicDataset",
     "DERasterBand",
@@ -43,65 +46,15 @@ DATATYPE_TIF = [
     "DERasterDataset",
     "GPRasterLayer",
 ]
+
 DATATYPE_DIR = ["DEFolder","DEWorkspace","GPString"]
+
 DATATYPE_FLD = "Field"
 
-FBS2DTest_HELP_DESCRIPTION = ( 
-    "Working Standard ID 128: For floodplains mapped from 2D models, "
-    + "evaluation lines and BFE lines on the FIRM must match modeled water "
-    + "surface elevations and must be plotted at intervals sufficient to interpolate "
-    + "accurate BFEs in between BFE or evaluation lines. If this is not possible, "
-    + "separate Flood Profiles for significant flow paths and/or FIS Report inserts "
-    + "must also be created.\n"
-    + "According to FEMA’s Mapping Base Flood Elevations on FIRMs Guidance "
-    + "(November 2023): Where BFEs and evaluation lines are the primary source "
-    + "of water surface elevation information on the FIRM, the mapping partner "
-    + "should confirm that the lines placed are sufficient to linearly interpolate "
-    + "the BFE at any point in the floodplain within 0.1 foot of the true value from "
-    + "the model water surface elevation grid.\n"
-    + "STEP 1 | After placing BFEs and evaluation lines in accordance with FEMA’s "
-    + "Guidelines & Standards, contractors should compare a water surface elevation "
-    + "(WSEL) grid generated from the mapped evaluation lines and BFEs to the raw WSEL "
-    + "grid output from the model to determine if the BFE and evaluation line spacing "
-    + "is adequate (i.e., that interpolated water surface elevations fall within 0.1 "
-    + "foot of the modeled results).\n"
-    + "STEP 2 | The mapped WSEL grid can be compared to the modeled WSEL grid by "
-    + "extracting WSEL values to 'Test Points' and calculating the difference between "
-    + "the two surfaces. When creating Test Points, it is important to ensure that "
-    + "the number or density of test points is sufficient to provide a reliable "
-    + "assessment of the entire mapped grid. At a minimum, Test Points must be "
-    + "reasonably and uniformly distributed across the mapped floodplain at a density "
-    + "of at least 1 point per 2500 square feet (50x50 feet grid), with a visible increase "
-    + "in density through critical areas such as urban or developed areas, floodways, "
-    + "areas with significant elevation changes, and regions with high flood risk. This "
-    + "is achieved through exporting the computation points from the HEC-RAS model.\n"
-    + "STEP 3 | Once the difference in the WSEL grids at the test point locations "
-    + "has been calculated, the points are categorized as passing or failing "
-    + "depending on if the difference is within the 0.1-foot tolerance. The passing "
-    + "percentage should be calculated on a stream-by-stream basis. "
-    + "Detailed studies should pass with a reliability of 95% whereas Approximate "
-    + "studies should pass with a reliability of 90%."
-    + " If the stream passes and the "
-    + "community does not have a preference on developing a Flood Profile, no "
-    + "further action is needed besides the documentation mentioned in the "
-    + "following section.\n"
-    + "STEP 4 |If the stream is not passing, the BFEs and evaluation lines should "
-    + "be supplemented until the 0.1-foot tolerance is achieved. The points can "
-    + "be symbolized by the unique pass/fail values in order to clearly see areas "
-    + "within the floodplain that are failing and need additional BFEs. Please "
-    + "refer to the Mapping Base Flood Elevations on FIRMs Guidance for further "
-    + "details on placing BFEs.\n"
-    + "In some situations, it will not be possible to provide the required detail "
-    + "using BFE and evaluation lines due to spatial constraints and/or steep "
-    + "slope in the water surface profile. In these situations, especially if "
-    + "the water surface profile is not linear between mapped BFE or evaluation "
-    + "lines, the contractor and CTP should contact the Region 8 Engineer and "
-    + "PTS to determine whether Flood Profiles and/or FIS inserts  will be "
-    + "needed to provide the required detail for the product user. If a Flood "
-    + "Profile or FIS insert is considered inappropriate for the study reach, "
-    + "an exception to working standard ID 128 may be considered.\n"
-)
 
+# =========================
+# Core Functions
+# =========================
 
 # Helpful function to create functional tin and raster from GIS lines
 def xs_to_tin_to_raster_by_wtrnm(xs, f_profile, dem, output_dir):
@@ -170,6 +123,7 @@ def sid_128_2d_test(
         exclusion_polys,
         exclusion_comment_field,
         sfha_stillwater_field,
+        extend_features,
     ):
     """
     Using FEMA Region 8 2D Approach to test model grids against evaluation lines
@@ -180,6 +134,39 @@ def sid_128_2d_test(
     arcpy.env.cellSize = ras_wsel_01pct
 
     remove_datasets = []
+
+    extend_dist = int(extend_features.split(' ')[0])
+    if extend_dist > 0:
+        xslines_projected = join(out_directory, "xslines_projected.shp")
+        bfelines_projected = join(out_directory, "bfelines_projected.shp")
+        out_coor_system = arcpy.Describe(ras_wsel_01pct).spatialReference
+        updated_linear_distance = determine_current_projection_buffer_dist(out_coor_system, extend_features, out_directory)
+        updated_linear_distance_flt = float(updated_linear_distance.split(" ", 1)[0])
+
+        arcpy.AddMessage(f"Line features will be extended by {extend_features} / {updated_linear_distance}")
+        xslines_extended = join(out_directory, "xslines_extended.shp")
+        bfelines_extended = join(out_directory, "bfelines_extended.shp")
+
+        if bfelines is not None:
+            arcpy.management.Project(xslines, xslines_projected, out_coor_system,)
+            arcpy.management.Project(bfelines, bfelines_projected, out_coor_system,)
+
+            # xs_lineardist = convert_dist_for_projection(xslines_projected, extend_features)
+            # bfe_lineardist = convert_dist_for_projection(bfelines_projected, extend_features)
+            xslines = extend_shape_lines(xslines_projected, xslines_extended, updated_linear_distance_flt)
+            bfelines = extend_shape_lines(bfelines_projected, bfelines_extended, updated_linear_distance_flt)
+
+            remove_datasets.extend([xslines_projected, bfelines_projected, xslines_extended, bfelines_extended])
+            pass
+        else:
+            arcpy.management.Project(xslines, xslines_projected, out_coor_system,)
+            # xs_lineardist = convert_dist_for_projection(xslines_projected, extend_features)
+            xslines = extend_shape_lines(xslines_projected, xslines_extended, updated_linear_distance_flt)
+
+            remove_datasets.extend([xslines_projected, xslines_extended])
+            pass
+    else:
+        arcpy.AddMessage(f"Features will not be extended ({extend_features})")
 
     arcpy.AddMessage("Merge the eval XS lines with BFE Lines to map flood fingers")
     if bfelines is not None:
@@ -357,7 +344,7 @@ def sid_128_2d_test(
         exclusion_comment_field,
     )
 
-    remove_datasets.extend([test_mesh_polys, outtin, out_summary_table])
+    remove_datasets.extend([test_mesh_polys, out_summary_table])
 
     return remove_datasets
 
@@ -485,6 +472,103 @@ def input_messages(
     return None
 
 
+
+def extend_point(p_from, p_to, dist, reverse=False):
+    dx = p_to.X - p_from.X
+    dy = p_to.Y - p_from.Y
+    length = math.hypot(dx, dy)
+
+    if length == 0:
+        return p_from
+
+    ux = dx / length
+    uy = dy / length
+
+    if reverse:
+        # arcpy.AddMessage(f"{p_from.X}, {ux}, {dist}")
+        # arcpy.AddMessage(f"{type(p_from.X)}, {type(ux)}, {type(dist)}")
+        x_ = p_from.X - ux * dist
+        y_ = p_from.Y - uy * dist
+        return arcpy.Point(x_, y_)
+    else:
+        x_ = p_from.X + ux * dist
+        y_ = p_from.Y + uy * dist
+        return arcpy.Point(x_, y_)
+
+
+def extend_shape_lines(input_fc, output_fc, extend_dist):
+    """"""
+    arcpy.CopyFeatures_management(input_fc, output_fc)
+    arcpy.edit.Densify(output_fc, "DISTANCE", "1 FeetUS")
+
+    with arcpy.da.UpdateCursor(output_fc, ["SHAPE@"]) as cursor:
+        for row in cursor:
+            geom = row[0]
+
+            new_parts = []
+
+            # Loop through each part (handles multipart features)
+            for part in geom:
+                points = [pt for pt in part if pt]
+
+                if len(points) < 2:
+                    new_parts.append(part)
+                    continue
+
+                # --- FIRST SEGMENT ---
+                p0 = points[0]
+                p1 = points[1]
+
+                new_start = extend_point(p0, p1, extend_dist, reverse=True)
+
+                # --- LAST SEGMENT ---
+                p_last_1 = points[-2]
+                p_last = points[-1]
+
+                new_end = extend_point(p_last_1, p_last, extend_dist, reverse=False)
+
+                # Replace endpoints
+                points[0] = new_start
+                points[-1] = new_end
+
+                new_parts.append(arcpy.Array(points))
+
+            # Rebuild geometry
+            row[0] = arcpy.Polyline(
+                arcpy.Array(new_parts),
+                geom.spatialReference
+            )
+            cursor.updateRow(row)
+
+    return output_fc
+
+
+def determine_current_projection_buffer_dist(spatial_ref, linear_distance, out_directory):
+    """"""
+    temp_point_path = join(out_directory, "temp_point.shp")
+    temp_buffer_path = join(out_directory, "temp_buffer.shp")
+    temp_point = arcpy.PointGeometry(arcpy.Point(0, 0), spatial_ref)
+    arcpy.management.CopyFeatures([temp_point], temp_point_path)
+    arcpy.analysis.Buffer(temp_point_path, temp_buffer_path, linear_distance)
+    # buffered_geom = temp_point.buffer(linear_distance)
+    linear_unit = spatial_ref.linearUnitName
+
+    converted_distance = arcpy.Describe(temp_buffer_path).extent.XMax 
+
+    distance_converted_str = str(converted_distance) + f" {linear_unit}"
+    # arcpy.AddMessage(f"Updated extend distance = {distance_converted_str}")
+
+    for shp in [temp_point_path, temp_buffer_path]:
+        arcpy.management.Delete(shp)
+
+    return distance_converted_str
+
+
+# =========================
+# ArcGIS Toolbox Classes
+# =========================
+
+
 class Toolbox:
     def __init__(self):
         """Define the toolbox (the name of the toolbox is the name of the
@@ -500,7 +584,7 @@ class FBS2DTest:
     def __init__(self):
         """Define the tool (tool name is the name of the class)."""
         self.label = "SID 128 2D Test"
-        self.description = FBS2DTest_HELP_DESCRIPTION
+        self.description = "Working Standard ID 128: For floodplains mapped from 2D models"
 
     def getParameterInfo(self):
         """Define the tool parameters."""
@@ -588,12 +672,20 @@ class FBS2DTest:
                     parameterType = "Optional",
                     direction = "Input",
             )
+        extend_features = arcpy.Parameter(
+                    displayName = "(8) Extend XS/BFE features on each side (if applicable)",
+                    name = "extend_features",
+                    datatype = "GPLinearUnit",
+                    parameterType = "Optional",
+                    direction = "Input",
+            )
         wsel_field.parameterDependencies = [xslines.name]
         elev_field.parameterDependencies = [bfelines.name]
         sfha_stillwater_field.parameterDependencies = [sfha_01pct.name]
         exclusion_comment_field.parameterDependencies  = [exclusion_polys.name]
         tolerance.value = 0.1 # Vertical Feet Tolerance
         grid_size.value = "50 FEETUS" # U.S. Survey Feet
+        extend_features.value = "0 FEETUS" # U.S. Survey Feet
         params_2d_test = [
             xslines,
             wsel_field,
@@ -607,6 +699,7 @@ class FBS2DTest:
             out_directory,
             exclusion_polys,
             exclusion_comment_field,
+            extend_features,
         ]
         return params_2d_test
 
@@ -694,6 +787,7 @@ class FBS2DTest:
         out_directory = params_2d_test[9].valueAsText
         exclusion_polys = params_2d_test[10].valueAsText
         exclusion_comment_field = params_2d_test[11].valueAsText
+        extend_features = params_2d_test[12].valueAsText
 
         input_messages(
             xslines,
@@ -724,6 +818,7 @@ class FBS2DTest:
             exclusion_polys,
             exclusion_comment_field,
             sfha_stillwater_field,
+            extend_features,
         )
 
         for item in features:

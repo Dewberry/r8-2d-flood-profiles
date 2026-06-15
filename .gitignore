@@ -1,0 +1,2 @@
+# ignore xml files created by tool in ArcPro
+*.pyt.xml
