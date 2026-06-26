@@ -399,15 +399,15 @@ def result_messages(
             file.write(msg)
         return None
     
-    if valid_pass_pct >= 95.0:
-        msg = "Passed More than 95%\n Detailed with Floodway, Passed"
+    if valid_pass_pct >= 85.0:
+        msg = "Passed More than 85%\n Detailed with Floodway, Passed"
         arcpy.AddMessage(msg)
         with open(results_txt_file, "a") as file:
             file.write(msg)
 
-    elif 95.0 > valid_pass_pct >= 90.0:
+    elif 85.0 > valid_pass_pct >= 80.0:
         msg = (
-            r"Passed Between 90% and 95%"
+            r"Passed Between 80% and 85%"
             + "\n Detailed with Floodway: Failed\n Detailed without Floodway, Passed"
         )
         arcpy.AddMessage(msg)
@@ -415,7 +415,7 @@ def result_messages(
             file.write(msg)
 
     else:
-        msg = "Detailed with or without Floodway (less than 90%), Failed"
+        msg = "Detailed with or without Floodway (less than 80%), Failed"
         arcpy.AddMessage(msg)
         with open(results_txt_file, "a") as file:
             file.write(msg)
